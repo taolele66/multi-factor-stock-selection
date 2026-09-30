@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+data_cache/
+run_output*.log
+run_real.log
+.DS_Store
+venv/
+.venv/
