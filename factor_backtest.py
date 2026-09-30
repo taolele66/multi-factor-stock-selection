@@ -68,6 +68,7 @@ def get_data_synthetic(n_stocks=N_STOCKS, start=START_DATE, end=END_DATE,
       mktcap_df  : 日频市值
       fin_df     : 月度财务指标 (date, stock, pe, pb, roe, npm, accrual, leverage)
       industries : {股票代码: 行业标签}
+      index_series : 日频"指数"参考线 (这里用全部模拟股票的等权均价近似)
 
     为了让"因子检验"这一步有意义，这里人为给每只股票一个 true_alpha，
     使得低PE/低PB/高ROE的股票未来收益略高——这样你能在IC检验里看到
@@ -105,7 +106,9 @@ def get_data_synthetic(n_stocks=N_STOCKS, start=START_DATE, end=END_DATE,
             records.append([m, s, pe, pb, roe, npm, accrual, leverage])
     fin_df = pd.DataFrame(records, columns=["date", "stock", "pe", "pb", "roe", "npm", "accrual", "leverage"])
 
-    return price_df, mktcap_df, fin_df, industries
+    index_series = price_df.mean(axis=1)
+
+    return price_df, mktcap_df, fin_df, industries, index_series
 
 
 def _sina_symbol(code):
@@ -201,6 +204,7 @@ def get_data_real(n_stocks=REAL_DATA_N_STOCKS, start=START_DATE, end=END_DATE):
       - ROE/销售净利率/资产负债率/每股收益/每股经营现金流（单季度，同一个接口一次拿全，
         用来拼质量因子）：ak.stock_financial_abstract_ths
       - 行业分类：ak.stock_industry_clf_hist_sw（申万一级行业，失败则降级跳过行业中性化）
+      - 沪深300指数真实点位：ak.stock_zh_index_daily（新浪，仅用于图表参考线，不参与选股/回测计算）
 
     首次运行会请求网络（几百只股票 x 3-4个接口，可能需要几分钟到十几分钟），
     每只股票的原始数据会缓存到 ./data_cache/，重复运行会直接读缓存、秒开。
@@ -315,7 +319,16 @@ def get_data_real(n_stocks=REAL_DATA_N_STOCKS, start=START_DATE, end=END_DATE):
     print("STEP 1d: 获取行业分类...")
     industries = _fetch_industry_map(list(price_df.columns))
 
-    return price_df, mktcap_df, fin_df, industries
+    print("STEP 1e: 获取沪深300指数真实点位（仅作图表参考线，不参与选股/回测）...")
+    try:
+        idx = _cached_csv("index_000300.csv", lambda: ak.stock_zh_index_daily(symbol="sh000300"))
+        idx["date"] = pd.to_datetime(idx["date"])
+        index_series = idx.set_index("date")["close"].sort_index().loc[start:end]
+    except Exception as e:
+        print(f"  [警告] 沪深300指数点位获取失败（{type(e).__name__}: {e}），图表里将不显示这条参考线")
+        index_series = pd.Series(dtype=float)
+
+    return price_df, mktcap_df, fin_df, industries, index_series
 
 
 # ============================================================
@@ -694,9 +707,9 @@ def main():
     print("STEP 1: 获取数据")
     print("=" * 60)
     if USE_REAL_DATA:
-        price_df, mktcap_df, fin_df, industries = get_data_real()
+        price_df, mktcap_df, fin_df, industries, index_series = get_data_real()
     else:
-        price_df, mktcap_df, fin_df, industries = get_data_synthetic()
+        price_df, mktcap_df, fin_df, industries, index_series = get_data_synthetic()
     print(f"股票数量: {price_df.shape[1]}, 交易日数量: {price_df.shape[0]}")
 
     print("\n" + "=" * 60)
@@ -801,7 +814,15 @@ def main():
     axes[0].plot(nav_ew.index, nav_ew.values, label="等权合成策略")
     axes[0].plot(nav_fm_fixed.index, nav_fm_fixed.values, label="Fama-MacBeth(样本内固定权重)", linestyle=":")
     axes[0].plot(nav_fm_roll.index, nav_fm_roll.values, label="Fama-MacBeth(滚动窗口)")
-    axes[0].plot(nav_bench.index, nav_bench.reindex(nav_ew.index).values, label="基准", linestyle="--")
+    axes[0].plot(nav_bench.index, nav_bench.reindex(nav_ew.index).values, label="基准(等权持有全部股票池)", linestyle="--")
+    if len(index_series) > 0:
+        # 归一化到和其它策略同一个起点(1.0)，方便直接比较涨跌幅；用asof而不是精确匹配日期，
+        # 因为指数是日频、策略净值是月末频率，两者的日期不会完全对齐。
+        idx_base = index_series.asof(nav_ew.index[0])
+        if pd.notna(idx_base) and idx_base > 0:
+            index_nav = index_series / idx_base
+            axes[0].plot(index_nav.index, index_nav.values, label="沪深300指数(真实点位，仅作参考)",
+                         color="black", linewidth=1, alpha=0.6)
     axes[0].axvline(pd.Timestamp(IN_SAMPLE_END), color="gray", linestyle="-.", linewidth=1)
     axes[0].text(pd.Timestamp(IN_SAMPLE_END), axes[0].get_ylim()[1], " 样本外→",
                  fontsize=8, color="gray", va="top")
